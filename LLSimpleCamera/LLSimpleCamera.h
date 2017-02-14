@@ -39,6 +39,11 @@ typedef enum : NSUInteger {
 @interface LLSimpleCamera : UIViewController
 
 /**
+ * AVCaptureDevice for this camera
+ */
+@property (strong, nonatomic) AVCaptureDevice *videoCaptureDevice;
+
+/**
  * Triggered on device change.
  */
 @property (nonatomic, copy) void (^onDeviceChange)(LLSimpleCamera *camera, AVCaptureDevice *device);
