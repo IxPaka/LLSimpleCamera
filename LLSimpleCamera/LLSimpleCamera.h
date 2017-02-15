@@ -39,6 +39,11 @@ typedef enum : NSUInteger {
 @interface LLSimpleCamera : UIViewController
 
 /**
+ * AVCaptureVideoPreviewLayer for this camera
+ */
+@property (strong, nonatomic) AVCaptureVideoPreviewLayer *captureVideoPreviewLayer;
+
+/**
  * AVCaptureDevice for this camera
  */
 @property (strong, nonatomic) AVCaptureDevice *videoCaptureDevice;
