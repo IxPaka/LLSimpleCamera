@@ -39,21 +39,6 @@ typedef enum : NSUInteger {
 @interface LLSimpleCamera : UIViewController
 
 /**
- * AVCaptureSession for this camera
- */
-@property (strong, nonatomic) AVCaptureSession *session;
-
-/**
- * AVCaptureVideoPreviewLayer for this camera
- */
-@property (strong, nonatomic) AVCaptureVideoPreviewLayer *captureVideoPreviewLayer;
-
-/**
- * AVCaptureDevice for this camera
- */
-@property (strong, nonatomic) AVCaptureDevice *videoCaptureDevice;
-
-/**
  * Triggered on device change.
  */
 @property (nonatomic, copy) void (^onDeviceChange)(LLSimpleCamera *camera, AVCaptureDevice *device);
@@ -163,6 +148,10 @@ typedef enum : NSUInteger {
  */
 - (void)stop;
 
+/**
+ * Starts face detection if it is not running already.
+ */
+- (void)startFaceDetection;
 
 /**
  * Capture an image.

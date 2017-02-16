@@ -16,6 +16,9 @@
 @property (strong, nonatomic) UIView *preview;
 @property (strong, nonatomic) AVCaptureStillImageOutput *stillImageOutput;
 @property (strong, nonatomic) AVCaptureDevice *audioCaptureDevice;
+@property (strong, nonatomic) AVCaptureVideoPreviewLayer *captureVideoPreviewLayer;
+@property (strong, nonatomic) AVCaptureDevice *videoCaptureDevice;
+@property (strong, nonatomic) AVCaptureSession *session;
 @property (strong, nonatomic) AVCaptureDeviceInput *videoDeviceInput;
 @property (strong, nonatomic) AVCaptureDeviceInput *audioDeviceInput;
 @property (strong, nonatomic) UITapGestureRecognizer *tapGesture;
@@ -27,12 +30,13 @@
 @property (nonatomic, assign) CGFloat effectiveScale;
 @property (nonatomic, copy) void (^didRecordCompletionBlock)(LLSimpleCamera *camera, NSURL *outputFileUrl, NSError *error);
 
-@property (nonatomic) CFAbsoluteTime numFaceChangedTime;
-@property (nonatomic) CFAbsoluteTime avfLastFrameTime;
+@property (nonatomic, assign) CFAbsoluteTime numFaceChangedTime;
+@property (nonatomic, assign) CFAbsoluteTime avfLastFrameTime;
 @property (nonatomic, assign) NSInteger currentFaceID;
 @property (nonatomic, strong) AVCaptureMetadataOutput *metadataOutput;
 @property (nonatomic, assign) float avfProcessingInterval;
 @property (nonatomic, strong) NSMutableDictionary* avfFaceLayers;
+@property (nonatomic, assign) BOOL faceDetectionStarted;
 
 @end
 
@@ -303,6 +307,10 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
 
 - (void)startFaceDetection {
     
+    if (self.faceDetectionStarted == YES) {
+        return;
+    }
+    self.faceDetectionStarted = YES;
     self.avfProcessingInterval = 1;
     self.avfFaceLayers = [NSMutableDictionary new];
     self.numFaceChangedTime = CFAbsoluteTimeGetCurrent();
@@ -336,6 +344,7 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
     
     self.metadataOutput = nil;
     self.avfFaceLayers = nil;
+    self.faceDetectionStarted = NO;
 }
 
 - (AVMetadataFaceObject *)findCurrentFaceObjectInFaces:(NSArray *)faces
@@ -383,6 +392,7 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
     {
         layer = [CALayer new];
         layer.borderWidth = 2.0;
+        layer.cornerRadius = 1.0f;
         layer.borderColor = [[UIColor orangeColor] CGColor];
         
         [self.view.layer addSublayer:layer];
@@ -492,7 +502,6 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
     // focus every .2 seconds
     
     if (CFAbsoluteTimeGetCurrent() > self.numFaceChangedTime + 0.2) {
-        NSLog(@"!!!!Focusing on face!!!");
         CGPoint focusPoint = CGPointMake(CGRectGetMidX(face.bounds), CGRectGetMidY(face.bounds));
         [self focusAtPoint:focusPoint];
         
@@ -501,14 +510,6 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
 }
 
 -(void)captureOutput:(AVCaptureOutput *)captureOutput didOutputMetadataObjects:(NSArray *)faces fromConnection:(AVCaptureConnection *)connection {
-    
-    NSLog(@"Detected faces!!!!");
-    // do not refocus on faces if disabled
-//    if (self.disabled)
-//    {
-//        [self removeAllFaces];
-//        return;
-//    }
     
     // We can assume all received metadata objects are AVMetadataFaceObject only
     // because we set the AVCaptureMetadataOutput's metadataObjectTypes
@@ -936,6 +937,10 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
 
 - (void)previewTapped:(UIGestureRecognizer *)gestureRecognizer
 {
+    if (self.faceDetectionStarted == YES) {
+        [self stopFaceDetection];
+    }
+    
     if(!self.tapToFocus) {
         return;
     }
