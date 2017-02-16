@@ -10,8 +10,9 @@
 #import <ImageIO/CGImageProperties.h>
 #import "UIImage+FixOrientation.h"
 #import "LLSimpleCamera+Helper.h"
+#import "CALayer+Additions.h"
 
-@interface LLSimpleCamera () <AVCaptureFileOutputRecordingDelegate, UIGestureRecognizerDelegate>
+@interface LLSimpleCamera () <AVCaptureFileOutputRecordingDelegate, UIGestureRecognizerDelegate, AVCaptureMetadataOutputObjectsDelegate>
 @property (strong, nonatomic) UIView *preview;
 @property (strong, nonatomic) AVCaptureStillImageOutput *stillImageOutput;
 @property (strong, nonatomic) AVCaptureDevice *audioCaptureDevice;
@@ -25,6 +26,14 @@
 @property (nonatomic, assign) CGFloat beginGestureScale;
 @property (nonatomic, assign) CGFloat effectiveScale;
 @property (nonatomic, copy) void (^didRecordCompletionBlock)(LLSimpleCamera *camera, NSURL *outputFileUrl, NSError *error);
+
+@property (nonatomic) CFAbsoluteTime numFaceChangedTime;
+@property (nonatomic) CFAbsoluteTime avfLastFrameTime;
+@property (nonatomic, assign) NSInteger currentFaceID;
+@property (nonatomic, strong) AVCaptureMetadataOutput *metadataOutput;
+@property (nonatomic, assign) float avfProcessingInterval;
+@property (nonatomic, strong) NSMutableDictionary* avfFaceLayers;
+
 @end
 
 NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
@@ -266,6 +275,9 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
         // continiously adjust white balance
         self.whiteBalanceMode = AVCaptureWhiteBalanceModeContinuousAutoWhiteBalance;
         
+        // face detection output
+        [self startFaceDetection];
+        
         // image output
         self.stillImageOutput = [[AVCaptureStillImageOutput alloc] init];
         NSDictionary *outputSettings = [[NSDictionary alloc] initWithObjectsAndKeys: AVVideoCodecJPEG, AVVideoCodecKey, nil];
@@ -287,6 +299,256 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
     self.session = nil;
 }
 
+#pragma mark - FaceDetection
+
+- (void)startFaceDetection {
+    
+    self.avfProcessingInterval = 1;
+    self.avfFaceLayers = [NSMutableDictionary new];
+    self.numFaceChangedTime = CFAbsoluteTimeGetCurrent();
+    
+    self.metadataOutput = [AVCaptureMetadataOutput new];
+    
+    if ([self.session canAddOutput:self.metadataOutput] == NO)
+    {
+        [self stopFaceDetection];
+        return;
+    }
+    
+    // Metadata processing will be fast, and mostly updating UI which should be done on the main thread
+    // So just use the main dispatch queue instead of creating a separate one
+    // (compare this to the expensive CoreImage face detection, done on a separate queue)
+    [self.metadataOutput setMetadataObjectsDelegate:self queue:dispatch_get_main_queue()];
+    [self.session addOutput:self.metadataOutput];
+    
+    // We only want faces, if we don't set this we would detect everything available
+    // (some objects may be expensive to detect, so best form is to select only what you need)
+    self.metadataOutput.metadataObjectTypes = @[ AVMetadataObjectTypeFace ];
+}
+
+- (void)stopFaceDetection {
+    
+    [self removeAllFaces];
+    if (self.metadataOutput)
+    {
+        [self.session removeOutput:self.metadataOutput];
+    }
+    
+    self.metadataOutput = nil;
+    self.avfFaceLayers = nil;
+}
+
+- (AVMetadataFaceObject *)findCurrentFaceObjectInFaces:(NSArray *)faces
+                                                unseen:(NSMutableSet *)unseen
+{
+    AVMetadataFaceObject *currentFaceObject = nil;
+    
+    for(AVMetadataFaceObject *face in faces)
+    {
+        NSNumber* faceID = [NSNumber numberWithInteger:face.faceID];
+        [unseen removeObject:faceID];
+        
+        if (face.faceID == self.currentFaceID)
+        {
+            currentFaceObject = face;
+            break;
+        }
+    }
+    
+    if (!currentFaceObject)
+    {
+        currentFaceObject = (AVMetadataFaceObject *)[faces firstObject];
+        //self.showsFaceBoxWhenEnabled = YES;
+        [self performSelector:@selector(removeAllFacesAndHideFaceBoxes) withObject:nil afterDelay:2.0];
+    }
+    
+    self.currentFaceID = currentFaceObject.faceID;
+    return currentFaceObject;
+}
+
+- (void)transformLayer:(CALayer *)layer
+    withMetaDataObject:(AVMetadataObject *)metaDataObject
+{
+    AVMetadataFaceObject *adjusted = (AVMetadataFaceObject*)[self.captureVideoPreviewLayer transformedMetadataObjectForMetadataObject:metaDataObject];
+    CATransform3D transform = CATransform3DIdentity;
+    layer.transform = transform;
+    layer.frame = adjusted.bounds;
+    layer.transform = transform;
+}
+
+- (CALayer *)layerForCurrentFaceID
+{
+    CALayer *layer = [self.avfFaceLayers objectForKey:@(self.currentFaceID)];
+    if (!layer)
+    {
+        layer = [CALayer new];
+        layer.borderWidth = 2.0;
+        layer.borderColor = [[UIColor orangeColor] CGColor];
+        
+        [self.view.layer addSublayer:layer];
+        [self.avfFaceLayers setObject:layer forKey:@(self.currentFaceID)];
+    }
+    return layer;
+}
+
+- (void)removeUnseenFaces:(NSMutableSet *)unseen
+{
+    for(NSNumber* faceID in unseen)
+    {
+        CALayer * layer = [self.avfFaceLayers objectForKey:faceID];
+        if (layer)
+        {
+            [layer removeFromSuperlayer];
+            [self.avfFaceLayers removeObjectForKey:faceID];
+        }
+    }
+}
+
+- (void)removeAllFacesAndHideFaceBoxes
+{
+    for(NSNumber* key in self.avfFaceLayers)
+    {
+        CALayer * layer = [self.avfFaceLayers objectForKey:key];
+        if (layer && layer.superlayer != nil)
+        {
+            CGFloat bigScale = 1.15;
+            CGSize bigSize = CGSizeMake(layer.frame.size.width * bigScale,
+                                        layer.frame.size.height * bigScale);
+            
+            CABasicAnimation *bigAnimation = [layer resizeFromSize:bigSize
+                                                            toSize:layer.frame.size
+                                                          duration:0.2];
+            
+            bigAnimation.beginTime = 0.0;
+            bigAnimation.fillMode = kCAFillModeForwards;
+            bigAnimation.removedOnCompletion = NO;
+            bigAnimation.repeatCount = 2;
+            
+            CGFloat smallScale = 0.7;
+            CGSize smallSize = CGSizeMake(layer.frame.size.width * smallScale,
+                                          layer.frame.size.height * smallScale);
+            
+            CABasicAnimation *smallAnimation = [layer resizeFromSize:layer.frame.size
+                                                              toSize:smallSize
+                                                            duration:0.15];
+            smallAnimation.beginTime = 0.4;
+            smallAnimation.fillMode = kCAFillModeForwards;
+            smallAnimation.removedOnCompletion = NO;
+            
+            
+            CABasicAnimation *opacityAnimation = [self fadeOutAnimation];
+            opacityAnimation.beginTime = smallAnimation.beginTime;
+            opacityAnimation.duration = smallAnimation.duration;
+            
+            
+            CAAnimationGroup *smallGroup = [CAAnimationGroup animation];
+            smallGroup.animations = @[bigAnimation, smallAnimation, opacityAnimation];
+            smallGroup.duration = 0.55;
+            smallGroup.beginTime = 0;
+            smallGroup.fillMode = kCAFillModeForwards;
+            smallGroup.removedOnCompletion = NO;
+            [layer addAnimation:smallGroup forKey:@"smallGroup"];
+            
+            [NSTimer scheduledTimerWithTimeInterval:smallGroup.duration
+                                             target:layer
+                                           selector:@selector(removeFromSuperlayer)
+                                           userInfo:nil
+                                            repeats:NO];
+            
+        }
+    }
+    
+    [self.avfFaceLayers removeAllObjects];
+}
+
+- (CABasicAnimation *)fadeOutAnimation
+{
+    CABasicAnimation *opacityAnimation = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    opacityAnimation.fromValue = @(1.0);
+    opacityAnimation.removedOnCompletion = NO;
+    opacityAnimation.fillMode = kCAFillModeForwards;
+    opacityAnimation.toValue = @(0.0);
+    
+    return opacityAnimation;
+}
+
+- (void)removeAllFaces
+{
+    for(NSNumber* key in self.avfFaceLayers)
+    {
+        CALayer * layer = [self.avfFaceLayers objectForKey:key];
+        if (layer && layer.superlayer != nil)
+        {
+            [layer removeFromSuperlayer];
+        }
+    }
+    
+    
+    [self.avfFaceLayers removeAllObjects];
+}
+
+- (void)focusCameraOnFace:(AVMetadataFaceObject *)face
+{
+    // focus every .2 seconds
+    
+    if (CFAbsoluteTimeGetCurrent() > self.numFaceChangedTime + 0.2) {
+        NSLog(@"!!!!Focusing on face!!!");
+        CGPoint focusPoint = CGPointMake(CGRectGetMidX(face.bounds), CGRectGetMidY(face.bounds));
+        [self focusAtPoint:focusPoint];
+        
+        self.numFaceChangedTime = CFAbsoluteTimeGetCurrent();
+    }
+}
+
+-(void)captureOutput:(AVCaptureOutput *)captureOutput didOutputMetadataObjects:(NSArray *)faces fromConnection:(AVCaptureConnection *)connection {
+    
+    NSLog(@"Detected faces!!!!");
+    // do not refocus on faces if disabled
+//    if (self.disabled)
+//    {
+//        [self removeAllFaces];
+//        return;
+//    }
+    
+    // We can assume all received metadata objects are AVMetadataFaceObject only
+    // because we set the AVCaptureMetadataOutput's metadataObjectTypes
+    // to solely provide AVMetadataObjectTypeFace (see setupAVFoundationFaceDetection)
+    if (!connection.enabled) return; // don't update face graphics when preview is frozen
+    
+    if (self.avfFaceLayers.count == 0) {
+        self.avfLastFrameTime = CFAbsoluteTimeGetCurrent();
+    }
+    else if(faces.count != 0)
+    {
+        CFAbsoluteTime curTime = CFAbsoluteTimeGetCurrent();
+        self.avfProcessingInterval = self.avfProcessingInterval*0.75 + (curTime - self.avfLastFrameTime)*0.25;
+        self.avfLastFrameTime = curTime;
+    }
+    
+    // As we process faces below, remove them from this set so at the end we'll know which faces were lost
+    NSMutableSet* unseen = [NSMutableSet setWithArray:self.avfFaceLayers.allKeys];
+    
+    // Begin display updates
+    [CATransaction begin];
+    
+    [CATransaction setAnimationDuration:self.avfProcessingInterval];
+    
+    AVMetadataFaceObject *currentFaceObject = [self findCurrentFaceObjectInFaces:faces unseen:unseen];
+    
+    [self focusCameraOnFace:currentFaceObject];
+    
+    //if (self.showsFaceBoxWhenEnabled)
+    {
+        CALayer *layer = [self layerForCurrentFaceID];
+        [self transformLayer:layer withMetaDataObject:currentFaceObject];
+    }
+    
+    self.currentFaceID = currentFaceObject.faceID;
+    
+    [self removeUnseenFaces:unseen];
+    
+    [CATransaction commit];
+}
 
 #pragma mark - Image Capture
 
@@ -714,6 +976,10 @@ NSString *const LLSimpleCameraErrorDomain = @"LLSimpleCameraErrorDomain";
 
 - (void)focusAtPoint:(CGPoint)point
 {
+    if ([self.videoCaptureDevice isAdjustingFocus] || [self.videoCaptureDevice isAdjustingExposure]) {
+        return;
+    }
+    
     AVCaptureDevice *device = self.videoCaptureDevice;
     if (device.isFocusPointOfInterestSupported && [device isFocusModeSupported:AVCaptureFocusModeAutoFocus]) {
         NSError *error;
